@@ -18,12 +18,12 @@
 #include <ESP8266WiFi.h>
 #include <PubSubClient.h>
 #include <EEPROM.h>
+#include <ArduinoJson.h>
 
 #include "properties.h"
 /*
  * Either create a properties.h file containing the following values or just define them here:
  * 
- * #define MQTT_CURRENT_TEMPERATURE "<MQTT topic current temperature>"
  * #define MQTT_HEATING_SWITCH_COMMAND "<MQTT topic switch heating thermostate>"
  * #define MQTT_MODE "<MQTT topic mode>"
  * #define MQTT_STATUS "<MQTT topic status>"
@@ -34,6 +34,17 @@
  * #define WLAN_PASSWORD "<WLAN password>"
  * 
  */
+
+/*
+ * Definiert das MQTT-Topic um die aktuelle Konfiguration zu ermitteln.
+ * Diese sollte dauerhaft gespeichert werden (retain) und folgendes JSON-Format aufweisen:
+ * 
+ */
+#define MQTT_TOPIC_CONFIG "softheat/configuration"
+
+#define MAX_MQTT_TOPIC_LENGTH 128
+
+#define JSON_VERSION "2021.1"
 
 #define EEPROM_TEMP_TARGET 0
 
@@ -48,12 +59,30 @@ const char* mqtt_server = MQTT_SERVER;
 int temperatureTargetValue;
 float temperatureCurrentValue = 100.0;
 
+#define MAX_BLINK 10
+#define BLINK_DURATION_MS 250
+
+#define BLINK_MODE_WAIT_CONFIG 7
+#define BLINK_MODE_WAIT_TEMPERATURE 2
+
+#define BLINK_MODE_HEATING_MISSING 3
+
+byte blinkMode = 4;
+byte blinkCounter = 0;
+unsigned long blinkLast = 0;
+
+
+char mqttTopicCurrentTemperature[MAX_MQTT_TOPIC_LENGTH];
+char mqttTopicHeatingSwitchCommand[MAX_MQTT_TOPIC_LENGTH];
+
+
+//char mqttTopicTargetTemperatureCommand[MAX_MQTT_TOPIC_LENGTH];
+
+
 WiFiClient espClient;
 PubSubClient client(espClient);
 
 unsigned long lastMsg = 0;
-#define MSG_BUFFER_SIZE	(50)
-char msg[MSG_BUFFER_SIZE];
 int mode = MODE_STARTING;
 
 void setup_wifi() {
@@ -108,36 +137,95 @@ void setCurrentTemperature(String tempString) {
   Serial.println("°C");
 }
 
+void updateConfig(const char* payload) {
+
+  DynamicJsonDocument doc(2048);
+
+  DeserializationError error = deserializeJson(doc, payload);
+
+    if (error) {
+    Serial.print(F("deserializeJson() failed: "));
+    Serial.println(error.f_str());
+    return;
+  }
+
+  const char* jsonVersion = doc["version"];
+  if(strcmp(jsonVersion, JSON_VERSION) != 0) {
+    Serial.println("error: invalid config json");    
+    return;
+  }
+
+  bool reconnectMqtt = false;
+
+  const char* jsonCurrentTemp = doc["currentTemp"];
+  if(strcmp(jsonCurrentTemp, mqttTopicCurrentTemperature) != 0) {
+
+    Serial.print("topic 'currentTemperature' changed to ");  
+    Serial.println(jsonCurrentTemp);  
+    
+    strncpy(mqttTopicCurrentTemperature, jsonCurrentTemp, sizeof(mqttTopicCurrentTemperature));
+    reconnectMqtt = true;    
+  }
+  
+  const char* jsonHeatingSwitch = doc["heatingSwitch"];
+  if(strcmp(jsonHeatingSwitch, mqttTopicHeatingSwitchCommand) != 0) {
+
+    Serial.print("topic 'heatingSwitch' changed to ");  
+    Serial.print(jsonHeatingSwitch);
+    Serial.println(" (no reconnect needed)");
+    
+    strncpy(mqttTopicHeatingSwitchCommand, jsonHeatingSwitch, sizeof(mqttTopicHeatingSwitchCommand));    
+  }
+  
+  if(reconnectMqtt) {
+    client.disconnect(); 
+  }
+}
+
+/**
+ * Die Methode wird ausgeführt, wenn eine neue MQTT-Nachricht empfangen wurde.
+ * 
+ */
 void callback(char* topic, byte* payload, unsigned int length) {
   Serial.print("Message arrived [");
   Serial.print(topic);
-  Serial.print("] ");
+  Serial.println("] ");
 
-  if(length > 10) {
+  if(length > 2048) {
     Serial.println("Error: payload too large");
     return;
   }
 
-  char x[length + 1];
-  memcpy(x, payload, length);
-  x[length] = 0;
+  char cstr_payload[length + 1];
+  memcpy(cstr_payload, payload, length);
+  cstr_payload[length] = 0;
 
-  if(strcmp(topic, MQTT_TARGET_COMMAND) == 0) {
-    setTargetTemperature(String(x));
-  } else if(strcmp(topic, MQTT_CURRENT_TEMPERATURE) == 0) {
-    setCurrentTemperature(String(x));
+  /* MQTT Konfigurationsnachricht */
+  if(strcmp(topic, MQTT_TOPIC_CONFIG) == 0) {
+    updateConfig(cstr_payload);
   }
+
+  else if(strcmp(topic, MQTT_TARGET_COMMAND) == 0) {
+    setTargetTemperature(String(cstr_payload));
+  } else if((strlen(mqttTopicCurrentTemperature) > 0) && (strcmp(topic, mqttTopicCurrentTemperature) == 0)) {
+    setCurrentTemperature(String(cstr_payload));
+  } 
 
 } 
 
 void updateHeating() {
 
+  if(strlen(mqttTopicHeatingSwitchCommand) == 0) {
+    blinkMode = BLINK_MODE_HEATING_MISSING;
+    return;
+  }
+
   if(temperatureCurrentValue < (float)temperatureTargetValue) {
-    client.publish(MQTT_HEATING_SWITCH_COMMAND, "on");    
+    client.publish(mqttTopicHeatingSwitchCommand, "on");    
     client.publish(MQTT_MODE, "heating");
     mode = MODE_HEATING;
   } else {
-    client.publish(MQTT_HEATING_SWITCH_COMMAND, "off");    
+    client.publish(mqttTopicHeatingSwitchCommand, "off");    
     client.publish(MQTT_MODE, "cooling");
     mode = MODE_COOLING;
   }
@@ -158,11 +246,21 @@ void reconnect() {
       
       // Once connected, publish an announcement...
       client.publish(MQTT_STATUS, "starting");
+
+      client.subscribe(MQTT_TOPIC_CONFIG);
+
+      if(strlen(mqttTopicCurrentTemperature) > 0) {
+
+        Serial.print("Subscribing topic 'currentTemperature': ");
+        Serial.println(mqttTopicCurrentTemperature);
+
+        client.subscribe(mqttTopicCurrentTemperature);       
+      }
+
       
       // ... and resubscribe
       client.subscribe(MQTT_TARGET_COMMAND);
-      client.subscribe(MQTT_CURRENT_TEMPERATURE);
-
+      
       String s = String(temperatureTargetValue);
       const char *v = s.c_str(); 
       client.publish(MQTT_TARGET, (const unsigned char *)v, strlen(v), true);
@@ -191,6 +289,9 @@ void setup_eeprom() {
 
 void setup() {
   pinMode(BUILTIN_LED, OUTPUT);     
+  digitalWrite(BUILTIN_LED, LOW);
+
+  
   Serial.begin(115200);
   setup_wifi();
   setup_eeprom();
@@ -199,6 +300,22 @@ void setup() {
   client.setCallback(callback);
 
   digitalWrite(BUILTIN_LED, HIGH);
+
+  blinkMode = BLINK_MODE_WAIT_CONFIG;
+}
+
+void updateBlink() {
+
+  unsigned long now = millis();
+  
+  if(now - blinkLast >= BLINK_DURATION_MS) {
+
+    blinkLast = now;
+    blinkCounter = (blinkCounter + 1) % (MAX_BLINK * 2);
+
+    bool isOn = (blinkCounter % 2 == 0) && (blinkCounter < 2 * blinkMode);
+    digitalWrite(BUILTIN_LED, isOn ? LOW : HIGH);
+  }  
 }
 
 void loop() {
@@ -207,9 +324,13 @@ void loop() {
     reconnect();
   }
   client.loop();
-  
-  unsigned long now = millis();
 
+  updateBlink();
+  
+//  unsigned long now = millis();
+
+
+/*
   if(now % 100 == 0) {
 
     switch(mode) {
@@ -242,7 +363,7 @@ void loop() {
     lastMsg = now;
 
     updateHeating();
-  }
+  }*/
     
     
 }
