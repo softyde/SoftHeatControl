@@ -41,6 +41,7 @@
  * 
  */
 #define MQTT_TOPIC_CONFIG "softheat/configuration"
+#define MQTT_TOPIC_LOG_FORMAT "softheat/log/%s"
 
 #define MAX_MQTT_TOPIC_LENGTH 128
 
@@ -74,6 +75,7 @@ unsigned long blinkLast = 0;
 
 char mqttTopicCurrentTemperature[MAX_MQTT_TOPIC_LENGTH];
 char mqttTopicHeatingSwitchCommand[MAX_MQTT_TOPIC_LENGTH];
+char mqttTopicTargetTemperatureCommand[MAX_MQTT_TOPIC_LENGTH];
 
 
 //char mqttTopicTargetTemperatureCommand[MAX_MQTT_TOPIC_LENGTH];
@@ -84,6 +86,28 @@ PubSubClient client(espClient);
 
 unsigned long lastMsg = 0;
 int mode = MODE_STARTING;
+
+String clientId;
+char logTopic[100];
+
+
+void Log(const char* format, ...)
+{
+  char output[512];
+  
+  va_list argptr;
+  va_start(argptr, format);
+  vsnprintf(output, sizeof(output), format, argptr);
+  va_end(argptr);
+
+  Serial.println(output);
+
+  if(client.connected()) {
+    client.publish(logTopic, output);
+  }
+}
+
+
 
 void setup_wifi() {
 
@@ -132,10 +156,28 @@ void setCurrentTemperature(String tempString) {
 
   temperatureCurrentValue = min(max(tempString.toFloat(), 0.0f), 40.0f);
 
-  Serial.print("Received current temperature: ");
-  Serial.print(temperatureCurrentValue);
-  Serial.println("°C");
+  Log("Received current temperature: %.2f°C", temperatureCurrentValue);
 }
+
+void readNewValue(char* target, size_t len, const char*source, const char* topic, bool* reconnectMqttTarget) {
+
+  if(source) {
+    if(strcmp(source, target) != 0) {
+      Log("Topic '%s' changed to %s", topic, source);  
+      strncpy(target, source, len);
+      if(reconnectMqttTarget != NULL) {
+        *reconnectMqttTarget = true;
+      }
+    }
+  } else if(strlen(target) > 0) {
+    target[0] = 0;
+    Log("topic '%s' cleared", topic);  
+    if(reconnectMqttTarget != NULL) {
+      *reconnectMqttTarget = true;
+    }
+  }  
+}
+
 
 void updateConfig(const char* payload) {
 
@@ -143,41 +185,25 @@ void updateConfig(const char* payload) {
 
   DeserializationError error = deserializeJson(doc, payload);
 
-    if (error) {
-    Serial.print(F("deserializeJson() failed: "));
-    Serial.println(error.f_str());
+  if (error) {
+    Log("DeserializeJson() failed: %s", error.f_str());
     return;
   }
 
   const char* jsonVersion = doc["version"];
   if(strcmp(jsonVersion, JSON_VERSION) != 0) {
-    Serial.println("error: invalid config json");    
+    Log("Error: invalid config json");    
     return;
   }
 
   bool reconnectMqtt = false;
-
-  const char* jsonCurrentTemp = doc["currentTemp"];
-  if(strcmp(jsonCurrentTemp, mqttTopicCurrentTemperature) != 0) {
-
-    Serial.print("topic 'currentTemperature' changed to ");  
-    Serial.println(jsonCurrentTemp);  
-    
-    strncpy(mqttTopicCurrentTemperature, jsonCurrentTemp, sizeof(mqttTopicCurrentTemperature));
-    reconnectMqtt = true;    
-  }
   
-  const char* jsonHeatingSwitch = doc["heatingSwitch"];
-  if(strcmp(jsonHeatingSwitch, mqttTopicHeatingSwitchCommand) != 0) {
-
-    Serial.print("topic 'heatingSwitch' changed to ");  
-    Serial.print(jsonHeatingSwitch);
-    Serial.println(" (no reconnect needed)");
-    
-    strncpy(mqttTopicHeatingSwitchCommand, jsonHeatingSwitch, sizeof(mqttTopicHeatingSwitchCommand));    
-  }
+  readNewValue(mqttTopicCurrentTemperature, sizeof(mqttTopicCurrentTemperature), doc["currentTemp"], "currentTemperature", &reconnectMqtt);
+  readNewValue(mqttTopicTargetTemperatureCommand, sizeof(mqttTopicTargetTemperatureCommand), doc["targetTempCommand"], "targetTemperature (command)", &reconnectMqtt);  
+  readNewValue(mqttTopicHeatingSwitchCommand, sizeof(mqttTopicHeatingSwitchCommand), doc["heatingSwitch"], "heatingSwitch", NULL);
   
   if(reconnectMqtt) {
+    Log("Config changed: reconnecting");
     client.disconnect(); 
   }
 }
@@ -187,12 +213,9 @@ void updateConfig(const char* payload) {
  * 
  */
 void callback(char* topic, byte* payload, unsigned int length) {
-  Serial.print("Message arrived [");
-  Serial.print(topic);
-  Serial.println("] ");
 
   if(length > 2048) {
-    Serial.println("Error: payload too large");
+    Log("Error: payload too large");
     return;
   }
 
@@ -205,7 +228,7 @@ void callback(char* topic, byte* payload, unsigned int length) {
     updateConfig(cstr_payload);
   }
 
-  else if(strcmp(topic, MQTT_TARGET_COMMAND) == 0) {
+  else if((strlen(mqttTopicTargetTemperatureCommand) > 0) && (strcmp(topic, mqttTopicTargetTemperatureCommand) == 0)) {
     setTargetTemperature(String(cstr_payload));
   } else if((strlen(mqttTopicCurrentTemperature) > 0) && (strcmp(topic, mqttTopicCurrentTemperature) == 0)) {
     setCurrentTemperature(String(cstr_payload));
@@ -233,16 +256,20 @@ void updateHeating() {
   
 }
 
+
 void reconnect() {
   // Loop until we're reconnected
   while (!client.connected()) {
     Serial.print("Attempting MQTT connection...");
     // Create a random client ID
-    String clientId = "ESP8266Client-";
+    clientId = "softheatcontrol-";
     clientId += String(random(0xffff), HEX);
     // Attempt to connect
     if (client.connect(clientId.c_str())) {
-      Serial.println("connected");
+
+      snprintf(logTopic, sizeof(logTopic),  MQTT_TOPIC_LOG_FORMAT, clientId.c_str());
+      
+      Log("connected");
       
       // Once connected, publish an announcement...
       client.publish(MQTT_STATUS, "starting");
@@ -251,15 +278,15 @@ void reconnect() {
 
       if(strlen(mqttTopicCurrentTemperature) > 0) {
 
-        Serial.print("Subscribing topic 'currentTemperature': ");
-        Serial.println(mqttTopicCurrentTemperature);
-
+        Log("Subscribing topic 'currentTemperature': %s", mqttTopicCurrentTemperature);
         client.subscribe(mqttTopicCurrentTemperature);       
       }
 
-      
-      // ... and resubscribe
-      client.subscribe(MQTT_TARGET_COMMAND);
+      if(strlen(mqttTopicTargetTemperatureCommand) > 0) {
+
+        Log("Subscribing topic 'targetTemperature (command)': %s", mqttTopicTargetTemperatureCommand);
+        client.subscribe(mqttTopicTargetTemperatureCommand);       
+      }
       
       String s = String(temperatureTargetValue);
       const char *v = s.c_str(); 
