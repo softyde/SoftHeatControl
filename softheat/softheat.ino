@@ -1,19 +1,19 @@
 /*
- * Heizungssteuerungsscript ESP8266
- * 
- * Copyright (c) 2021 Philipp Anné
- * 
- * Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the 
- * Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, 
- * and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software. 
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF 
- * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR 
- * ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH 
- * THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
- */
+   Heizungssteuerungsscript ESP8266
+
+   Copyright (c) 2021 Philipp Anné
+
+   Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the
+   Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software,
+   and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+
+   The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+
+   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+   MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR
+   ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH
+   THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+*/
 
 #include <ESP8266WiFi.h>
 #include <PubSubClient.h>
@@ -22,24 +22,19 @@
 
 #include "properties.h"
 /*
- * Either create a properties.h file containing the following values or just define them here:
- * 
- * #define MQTT_HEATING_SWITCH_COMMAND "<MQTT topic switch heating thermostate>"
- * #define MQTT_MODE "<MQTT topic mode>"
- * #define MQTT_STATUS "<MQTT topic status>"
- * #define MQTT_TARGET "<MQTT topic target temperature>"
- * #define MQTT_TARGET_COMMAND "<MQTT topic set target temperature>"
- * #define MQTT_SERVER "<MQTT server ip>"
- * #define WLAN_SSID "<WLAN ssid>"
- * #define WLAN_PASSWORD "<WLAN password>"
- * 
- */
+   Either create a properties.h file containing the following values or just define them here:
+
+   #define MQTT_SERVER "<MQTT server ip>"
+
+   #define WLAN_SSID "<WLAN ssid>"
+   #define WLAN_PASSWORD "<WLAN password>"
+*/
 
 /*
- * Definiert das MQTT-Topic um die aktuelle Konfiguration zu ermitteln.
- * Diese sollte dauerhaft gespeichert werden (retain) und folgendes JSON-Format aufweisen:
- * 
- */
+   Definiert das MQTT-Topic um die aktuelle Konfiguration zu ermitteln.
+   Diese sollte dauerhaft gespeichert werden (retain) und folgendes JSON-Format aufweisen:
+
+*/
 #define MQTT_TOPIC_CONFIG "softheat/configuration"
 #define MQTT_TOPIC_LOG_FORMAT "softheat/log/%s"
 
@@ -68,14 +63,22 @@ float temperatureCurrentValue = 100.0;
 
 #define BLINK_MODE_HEATING_MISSING 3
 
+
+#define MQTT_DEFAULT_MODE "softheat/mode"
+
 byte blinkMode = 4;
 byte blinkCounter = 0;
 unsigned long blinkLast = 0;
 
-
 char mqttTopicCurrentTemperature[MAX_MQTT_TOPIC_LENGTH];
 char mqttTopicHeatingSwitchCommand[MAX_MQTT_TOPIC_LENGTH];
 char mqttTopicTargetTemperatureCommand[MAX_MQTT_TOPIC_LENGTH];
+char mqttTopicTargetTemperature[MAX_MQTT_TOPIC_LENGTH];
+
+char mqttTopicMode[MAX_MQTT_TOPIC_LENGTH] = MQTT_DEFAULT_MODE;
+
+
+
 
 
 //char mqttTopicTargetTemperatureCommand[MAX_MQTT_TOPIC_LENGTH];
@@ -94,7 +97,7 @@ char logTopic[100];
 void Log(const char* format, ...)
 {
   char output[512];
-  
+
   va_list argptr;
   va_start(argptr, format);
   vsnprintf(output, sizeof(output), format, argptr);
@@ -102,7 +105,7 @@ void Log(const char* format, ...)
 
   Serial.println(output);
 
-  if(client.connected()) {
+  if (client.connected()) {
     client.publish(logTopic, output);
   }
 }
@@ -127,6 +130,9 @@ void setup_wifi() {
 
   randomSeed(micros());
 
+  client.setBufferSize(1024);
+
+
   Serial.println("");
   Serial.println("WiFi connected");
   Serial.println("IP address: ");
@@ -134,9 +140,9 @@ void setup_wifi() {
 }
 
 void setTargetTemperature(String tempString) {
-  
+
   temperatureTargetValue = min(max((int)tempString.toInt(), 16), 30);
-  
+
   Serial.print("Setting new temperature: ");
   Serial.print(temperatureTargetValue);
   Serial.println("°C");
@@ -146,10 +152,12 @@ void setTargetTemperature(String tempString) {
 
   // reset counter - prevents switches to occur too fast/often
   lastMsg = millis();
-  
-  String s = String(temperatureTargetValue);
-  const char *v = s.c_str(); 
-  client.publish(MQTT_TARGET, (const unsigned char *)v, strlen(v), true);
+
+  if (strlen(mqttTopicTargetTemperature) > 0) {
+    String s = String(temperatureTargetValue);
+    const char *v = s.c_str();
+    client.publish(mqttTopicTargetTemperature, (const unsigned char *)v, strlen(v), true);
+  }
 }
 
 void setCurrentTemperature(String tempString) {
@@ -161,27 +169,27 @@ void setCurrentTemperature(String tempString) {
 
 void readNewValue(char* target, size_t len, const char*source, const char* topic, bool* reconnectMqttTarget) {
 
-  if(source) {
-    if(strcmp(source, target) != 0) {
-      Log("Topic '%s' changed to %s", topic, source);  
+  if (source) {
+    if (strcmp(source, target) != 0) {
+      Log("Topic '%s' changed to %s", topic, source);
       strncpy(target, source, len);
-      if(reconnectMqttTarget != NULL) {
+      if (reconnectMqttTarget != NULL) {
         *reconnectMqttTarget = true;
       }
     }
-  } else if(strlen(target) > 0) {
+  } else if (strlen(target) > 0) {
     target[0] = 0;
-    Log("topic '%s' cleared", topic);  
-    if(reconnectMqttTarget != NULL) {
+    Log("topic '%s' cleared", topic);
+    if (reconnectMqttTarget != NULL) {
       *reconnectMqttTarget = true;
     }
-  }  
+  }
 }
 
 
 void updateConfig(const char* payload) {
 
-  DynamicJsonDocument doc(2048);
+  DynamicJsonDocument doc(1024);
 
   DeserializationError error = deserializeJson(doc, payload);
 
@@ -191,106 +199,128 @@ void updateConfig(const char* payload) {
   }
 
   const char* jsonVersion = doc["version"];
-  if(strcmp(jsonVersion, JSON_VERSION) != 0) {
-    Log("Error: invalid config json");    
+  if (strcmp(jsonVersion, JSON_VERSION) != 0) {
+    Log("Error: invalid config json");
     return;
   }
 
+  Log("Config: reloading");
+
   bool reconnectMqtt = false;
-  
-  readNewValue(mqttTopicCurrentTemperature, sizeof(mqttTopicCurrentTemperature), doc["currentTemp"], "currentTemperature", &reconnectMqtt);
-  readNewValue(mqttTopicTargetTemperatureCommand, sizeof(mqttTopicTargetTemperatureCommand), doc["targetTempCommand"], "targetTemperature (command)", &reconnectMqtt);  
-  readNewValue(mqttTopicHeatingSwitchCommand, sizeof(mqttTopicHeatingSwitchCommand), doc["heatingSwitch"], "heatingSwitch", NULL);
-  
-  if(reconnectMqtt) {
+
+  readNewValue(mqttTopicCurrentTemperature, sizeof(mqttTopicCurrentTemperature), doc["currentTemperature"], "currentTemperature", &reconnectMqtt);
+  readNewValue(mqttTopicTargetTemperature, sizeof(mqttTopicTargetTemperature), doc["targetTemperature"], "targetTemperature", NULL);
+  readNewValue(mqttTopicTargetTemperatureCommand, sizeof(mqttTopicTargetTemperatureCommand), doc["targetTemperatureCommand"], "targetTemperature (command)", &reconnectMqtt);
+  readNewValue(mqttTopicHeatingSwitchCommand, sizeof(mqttTopicHeatingSwitchCommand), doc["heatingSwitchCommand"], "heatingSwitch (command)", NULL);
+  readNewValue(mqttTopicMode, sizeof(mqttTopicMode), doc["mode"], "mode", NULL);
+
+  Log("Config: reloaded");
+
+  if (reconnectMqtt) {
     Log("Config changed: reconnecting");
-    client.disconnect(); 
+    client.disconnect();
   }
 }
 
 /**
- * Die Methode wird ausgeführt, wenn eine neue MQTT-Nachricht empfangen wurde.
- * 
- */
-void callback(char* topic, byte* payload, unsigned int length) {
+   Die Methode wird ausgeführt, wenn eine neue MQTT-Nachricht empfangen wurde.
 
-  if(length > 2048) {
+*/
+void callback(const char* topic, byte* payload, unsigned int length) {
+
+  if (length > 1024) {
     Log("Error: payload too large");
     return;
   }
 
+  // Copy the payload
   char cstr_payload[length + 1];
   memcpy(cstr_payload, payload, length);
   cstr_payload[length] = 0;
 
+  // Copy the topic
+  char copyTopic[strlen(topic) + 1];
+  strcpy(copyTopic, topic);
+
+
+  // IMPORTANT: topic and payload must be copied before calling "Log"
+  //            because client.publish overwrites these buffers
+  Log("Received %s (%d)", topic, length);
+
   /* MQTT Konfigurationsnachricht */
-  if(strcmp(topic, MQTT_TOPIC_CONFIG) == 0) {
+  if (strcmp(copyTopic, MQTT_TOPIC_CONFIG) == 0) {
     updateConfig(cstr_payload);
   }
 
-  else if((strlen(mqttTopicTargetTemperatureCommand) > 0) && (strcmp(topic, mqttTopicTargetTemperatureCommand) == 0)) {
+  else if ((strlen(mqttTopicTargetTemperatureCommand) > 0) && (strcmp(copyTopic, mqttTopicTargetTemperatureCommand) == 0)) {
     setTargetTemperature(String(cstr_payload));
-  } else if((strlen(mqttTopicCurrentTemperature) > 0) && (strcmp(topic, mqttTopicCurrentTemperature) == 0)) {
+  } else if ((strlen(mqttTopicCurrentTemperature) > 0) && (strcmp(copyTopic, mqttTopicCurrentTemperature) == 0)) {
     setCurrentTemperature(String(cstr_payload));
-  } 
+  }
 
-} 
+}
 
 void updateHeating() {
 
-  if(strlen(mqttTopicHeatingSwitchCommand) == 0) {
+  if (strlen(mqttTopicHeatingSwitchCommand) == 0) {
     blinkMode = BLINK_MODE_HEATING_MISSING;
     return;
   }
 
-  if(temperatureCurrentValue < (float)temperatureTargetValue) {
-    client.publish(mqttTopicHeatingSwitchCommand, "on");    
-    client.publish(MQTT_MODE, "heating");
+  if (temperatureCurrentValue < (float)temperatureTargetValue) {
+    client.publish(mqttTopicHeatingSwitchCommand, "on");
+    if(strlen(mqttTopicMode) > 0) {
+      client.publish(mqttTopicMode, "heating");
+    }
     mode = MODE_HEATING;
   } else {
-    client.publish(mqttTopicHeatingSwitchCommand, "off");    
-    client.publish(MQTT_MODE, "cooling");
+    client.publish(mqttTopicHeatingSwitchCommand, "off");
+    if(strlen(mqttTopicMode) > 0) {
+      client.publish(mqttTopicMode, "cooling");
+    }    
     mode = MODE_COOLING;
   }
 
-  
+
 }
 
 
 void reconnect() {
   // Loop until we're reconnected
   while (!client.connected()) {
-    Serial.print("Attempting MQTT connection...");
+    Serial.println("Attempting MQTT connection...");
     // Create a random client ID
     clientId = "softheatcontrol-";
     clientId += String(random(0xffff), HEX);
     // Attempt to connect
     if (client.connect(clientId.c_str())) {
 
+
       snprintf(logTopic, sizeof(logTopic),  MQTT_TOPIC_LOG_FORMAT, clientId.c_str());
-      
-      Log("connected");
-      
-      // Once connected, publish an announcement...
-      client.publish(MQTT_STATUS, "starting");
+
+      int bufSize = client.getBufferSize();
+      Log("Connected (obviously) as %s (Buffer size is %d)", logTopic, bufSize);
 
       client.subscribe(MQTT_TOPIC_CONFIG);
+      Log("Subscribed to config topic");
 
-      if(strlen(mqttTopicCurrentTemperature) > 0) {
+      if (strlen(mqttTopicCurrentTemperature) > 0) {
 
         Log("Subscribing topic 'currentTemperature': %s", mqttTopicCurrentTemperature);
-        client.subscribe(mqttTopicCurrentTemperature);       
+        client.subscribe(mqttTopicCurrentTemperature);
       }
 
-      if(strlen(mqttTopicTargetTemperatureCommand) > 0) {
+      if (strlen(mqttTopicTargetTemperatureCommand) > 0) {
 
         Log("Subscribing topic 'targetTemperature (command)': %s", mqttTopicTargetTemperatureCommand);
-        client.subscribe(mqttTopicTargetTemperatureCommand);       
+        client.subscribe(mqttTopicTargetTemperatureCommand);
       }
-      
-      String s = String(temperatureTargetValue);
-      const char *v = s.c_str(); 
-      client.publish(MQTT_TARGET, (const unsigned char *)v, strlen(v), true);
+
+      /*  if(strlen(mqttTopicTargetTemperature) > 0) {
+          String s = String(temperatureTargetValue);
+          const char *v = s.c_str();
+          client.publish(mqttTopicTargetTemperature, (const unsigned char *)v, strlen(v), true);
+        }*/
     } else {
       Serial.print("failed, rc=");
       Serial.print(client.state());
@@ -311,18 +341,18 @@ void setup_eeprom() {
 
   Serial.print("Temperature target value: ");
   Serial.print(temperatureTargetValue);
-  Serial.println("°C");  
+  Serial.println("°C");
 }
 
 void setup() {
-  pinMode(BUILTIN_LED, OUTPUT);     
+  pinMode(BUILTIN_LED, OUTPUT);
   digitalWrite(BUILTIN_LED, LOW);
 
-  
+
   Serial.begin(115200);
   setup_wifi();
   setup_eeprom();
-  
+
   client.setServer(mqtt_server, 1883);
   client.setCallback(callback);
 
@@ -334,14 +364,33 @@ void setup() {
 void updateBlink() {
 
   unsigned long now = millis();
-  
-  if(now - blinkLast >= BLINK_DURATION_MS) {
+
+  if (now - blinkLast >= BLINK_DURATION_MS) {
 
     blinkLast = now;
     blinkCounter = (blinkCounter + 1) % (MAX_BLINK * 2);
 
     bool isOn = (blinkCounter % 2 == 0) && (blinkCounter < 2 * blinkMode);
     digitalWrite(BUILTIN_LED, isOn ? LOW : HIGH);
+  }
+}
+
+void updateMode() {
+
+  static unsigned long lastModeUpdate = 0;
+
+  unsigned long now = millis();
+
+  if(strlen(mqttTopicMode) > 0) {
+    if(now - lastModeUpdate > 2000) {
+
+      lastModeUpdate = now;
+      if(mode == MODE_HEATING) {
+          client.publish(mqttTopicMode, "heating");
+      } else if(mode == MODE_COOLING) {
+          client.publish(mqttTopicMode, "cooling");
+      }  
+    }
   }  
 }
 
@@ -352,45 +401,20 @@ void loop() {
   }
   client.loop();
 
+  delay(1);
+
   updateBlink();
-  
-//  unsigned long now = millis();
+  updateMode();
 
 
-/*
-  if(now % 100 == 0) {
 
-    switch(mode) {
-    case MODE_STARTING:
-      // hectic flashing during startup
-      digitalWrite(BUILTIN_LED, (now / 100) % 2 == 0 ? HIGH : LOW);
-      break;
-    case MODE_HEATING:
-      // fast flashing while heating
-      digitalWrite(BUILTIN_LED, (now / 100) % 10 == 0 ? LOW : HIGH);
-      break;
-    case MODE_COOLING:
-      // slow flashing while cooling
-      digitalWrite(BUILTIN_LED, (now / 100) % 50 == 0 ? LOW: HIGH);
-      break;
-    }
+  unsigned long now = millis();
+  if (now - lastMsg >= 60000) {    
+    
+      Log("SoftHeatControl is alive");
+      lastMsg = now;
+
+      updateHeating();
   }
 
-  if(now % 5000 == 0) {
-
-    if(mode == MODE_HEATING) {
-      client.publish(MQTT_MODE, "heating");  
-    } else if(mode == MODE_COOLING) {
-      client.publish(MQTT_MODE, "cooling");  
-    }
-  }
-  
-  if (now - lastMsg >= 60000) {
-    client.publish(MQTT_STATUS, "alive");
-    lastMsg = now;
-
-    updateHeating();
-  }*/
-    
-    
 }
